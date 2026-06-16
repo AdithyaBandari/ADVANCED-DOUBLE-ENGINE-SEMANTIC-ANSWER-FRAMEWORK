@@ -1,0 +1,118 @@
+import os
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+
+# Point to the official classic bridge package
+from langchain_classic.chains import RetrievalQAWithSourcesChain
+
+#from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+
+print("All modules imported successfully!")
+
+# Set your exact Groq API key
+os.environ['GROQ_API_KEY'] = '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'
+
+#loading files
+pdf_files = [
+    "semantic.pdf",
+    "semantic1.pdf",
+    "semantic2.pdf",
+    "semantic3.pdf",
+    "semantic4.pdf"]
+
+documents = []
+print("Loading your PDF files...")
+
+for pdf in pdf_files:
+    if os.path.exists(pdf):
+        loader = PyPDFLoader(pdf)
+        documents.extend(loader.load())
+        print(f" -> Successfully loaded: {pdf}")
+    else:
+        print(f" ⚠️ Warning: '{pdf}' was not found in this folder. Skipping it.")
+
+print(f"Total PDF pages loaded into memory: {len(documents)}")
+
+#split data
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=20)
+chunks =text_splitter.split_documents(documents)
+#print(chunks)
+
+#embeddings
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+#faiss databasae
+vector_store = FAISS.from_documents(chunks, embedding_model)
+
+#bm25 search
+bm25_retriever = BM25Retriever.from_documents(chunks)
+
+#ensemble retriver
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[bm25_retriever, vector_store.as_retriever()],
+    weights=[0.5, 0.5])
+
+#intializing groq
+llm = ChatGroq(
+        api_key=os.environ['GROQ_API_KEY'],
+        model="llama-3.1-8b-instant"
+    )
+
+#prompts
+prompt = ChatPromptTemplate.from_template("""
+You are a helpful AI assistant.
+
+Answer only from the provided context.
+
+If the answer is not found in the context, say:
+"I could not find the answer in the uploaded documents."
+
+Context:
+{context}
+
+Question:
+{input}
+
+Answer:
+""")
+
+chain = RetrievalQAWithSourcesChain.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=ensemble_retriever,
+    )
+
+document_chain = create_stuff_documents_chain(
+    llm,
+    prompt
+)
+
+from langchain_classic.chains import create_retrieval_chain
+
+retrieval_chain = create_retrieval_chain(
+    ensemble_retriever,
+    document_chain
+)
+
+response = retrieval_chain.invoke(
+    {"input": "What is semantic search?"}
+)
+
+print(response["answer"])
+
+docs = ensemble_retriever.invoke("What is semantic search?")
+
+print("Number of docs:", len(docs))
+
+for i, doc in enumerate(docs):
+    print(f"\nDoc {i+1}")
+    print(doc.page_content[:500])
