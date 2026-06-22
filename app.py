@@ -5,11 +5,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever
+from langchain.retrievers import EnsembleRetriever
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 import tempfile
 from pathlib import Path
 
@@ -87,6 +87,23 @@ if 'retrieval_chain' not in st.session_state:
 if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 
+# Cached functions for expensive operations
+@st.cache_resource
+def get_embedding_model():
+    """Cache the embedding model to avoid reloading"""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+@st.cache_resource
+def get_llm(api_key, model_name):
+    """Cache the LLM to avoid reinitialization"""
+    return ChatGroq(
+        api_key=api_key,
+        model=model_name,
+        temperature=0.7
+    )
+
 # Main content area
 tab1, tab2, tab3 = st.tabs(["📤 Upload & Process", "💬 Ask Questions", "📊 Document Info"])
 
@@ -109,6 +126,8 @@ with tab1:
             st.session_state.vector_store = None
             st.session_state.retrieval_chain = None
             st.session_state.chat_history = []
+            # Clear cached resources
+            st.cache_resource.clear()
             st.success("All data cleared!")
     
     if uploaded_files and api_key:
@@ -129,10 +148,16 @@ with tab1:
                             loader = PyPDFLoader(tmp_path)
                             documents.extend(loader.load())
                             st.success(f"✅ Loaded: {uploaded_file.name}")
+                        except Exception as e:
+                            st.error(f"❌ Error loading {uploaded_file.name}: {str(e)}")
                         finally:
                             # Clean up temp file
                             if os.path.exists(tmp_path):
                                 os.remove(tmp_path)
+                    
+                    if not documents:
+                        st.error("❌ No documents could be loaded. Please check your PDF files.")
+                        st.stop()
                     
                     st.session_state.documents = documents
                     st.info(f"Total pages loaded: {len(documents)}")
@@ -147,61 +172,68 @@ with tab1:
                         st.info(f"Created {len(chunks)} chunks")
                     
                     # Create embeddings
-                    with st.spinner("Creating embeddings..."):
-                        embedding_model = HuggingFaceEmbeddings(
-                            model_name="sentence-transformers/all-MiniLM-L6-v2"
-                        )
-                        vector_store = FAISS.from_documents(chunks, embedding_model)
-                        st.session_state.vector_store = vector_store
-                        st.success("✅ Vector store created")
+                    with st.spinner("Creating embeddings (this may take a moment)..."):
+                        try:
+                            embedding_model = get_embedding_model()
+                            vector_store = FAISS.from_documents(chunks, embedding_model)
+                            st.session_state.vector_store = vector_store
+                            st.success("✅ Vector store created")
+                        except Exception as e:
+                            st.error(f"❌ Embedding error: {str(e)}")
+                            st.stop()
                     
                     # Create BM25 retriever
                     with st.spinner("Creating BM25 retriever..."):
-                        bm25_retriever = BM25Retriever.from_documents(chunks)
-                        st.success("✅ BM25 retriever created")
+                        try:
+                            bm25_retriever = BM25Retriever.from_documents(chunks)
+                            st.success("✅ BM25 retriever created")
+                        except Exception as e:
+                            st.error(f"❌ BM25 error: {str(e)}")
+                            st.stop()
                     
                     # Create ensemble retriever
                     with st.spinner("Creating ensemble retriever..."):
-                        ensemble_retriever = EnsembleRetriever(
-                            retrievers=[bm25_retriever, vector_store.as_retriever()],
-                            weights=[bm25_weight, faiss_weight]
-                        )
-                        st.success("✅ Ensemble retriever created")
+                        try:
+                            ensemble_retriever = EnsembleRetriever(
+                                retrievers=[bm25_retriever, vector_store.as_retriever()],
+                                weights=[bm25_weight, faiss_weight]
+                            )
+                            st.success("✅ Ensemble retriever created")
+                        except Exception as e:
+                            st.error(f"❌ Ensemble retriever error: {str(e)}")
+                            st.stop()
                     
                     # Initialize LLM and chain
                     with st.spinner("Initializing LLM and chain..."):
-                        llm = ChatGroq(
-                            api_key=api_key,
-                            model=model_option
-                        )
-                        
-                        prompt = ChatPromptTemplate.from_template("""
-You are a helpful AI assistant specialized in answering questions about the provided documents.
+                        try:
+                            llm = get_llm(api_key, model_option)
+                            
+                            prompt = ChatPromptTemplate.from_template("""You are a helpful AI assistant specialized in answering questions about the provided documents.
 
-Answer only from the provided context. Be specific and cite relevant information.
+Answer the question based only on the provided context. Be specific and cite relevant information from the documents.
 
-If the answer cannot be found in the context, clearly state:
-"I could not find the answer in the uploaded documents."
+If the answer cannot be found in the context, clearly state: "I could not find the answer in the uploaded documents."
 
 Context:
 {context}
 
-Question:
-{input}
+Question: {input}
 
-Answer:
-""")
-                        
-                        document_chain = create_stuff_documents_chain(llm, prompt)
-                        retrieval_chain = create_retrieval_chain(ensemble_retriever, document_chain)
-                        st.session_state.retrieval_chain = retrieval_chain
-                        st.success("✅ Retrieval chain initialized")
+Answer:""")
+                            
+                            document_chain = create_stuff_documents_chain(llm, prompt)
+                            retrieval_chain = create_retrieval_chain(ensemble_retriever, document_chain)
+                            st.session_state.retrieval_chain = retrieval_chain
+                            st.success("✅ Retrieval chain initialized")
+                        except Exception as e:
+                            st.error(f"❌ LLM initialization error: {str(e)}")
+                            st.stop()
                     
                     st.success("🎉 All documents processed successfully!")
                     st.balloons()
                     
                 except Exception as e:
-                    st.error(f"❌ Error processing documents: {str(e)}")
+                    st.error(f"❌ Unexpected error: {str(e)}")
     
     elif uploaded_files and not api_key:
         st.error("❌ Please enter your Groq API Key first!")
@@ -314,7 +346,8 @@ with tab3:
                     page_num = doc.metadata.get('page', i)
                     char_count = len(doc.page_content)
                     st.write(f"**Page {page_num}** ({char_count} characters)")
-                    st.write(doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
+                    preview = doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content
+                    st.write(preview)
 
 # Footer
 st.divider()
@@ -322,5 +355,6 @@ st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
     <p><strong>Advanced Dual Engine Semantic Answer Framework</strong></p>
     <p>Powered by LangChain, FAISS, BM25, and Groq</p>
+    <p style='font-size: 0.85em;'>v2.0 - Optimized for Streamlit Cloud</p>
 </div>
 """, unsafe_allow_html=True)
